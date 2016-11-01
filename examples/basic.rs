@@ -24,7 +24,7 @@ fn main() {
 
     let encoded: Vec<u8> = encode(&world, SizeLimit::Infinite, FloatEncoding::F16).unwrap();
 
-    // 1 byte for the length of the vector, 1 byte for id, 2 bytes per float.
+    // 1 byte for id, 1 byte for the length of the vector, 2 bytes per float.
     assert_eq!(encoded.len(), 1 + 1 + 4 * 2);
 
     let decoded: World = decode(&encoded, FloatEncoding::F16).unwrap();
