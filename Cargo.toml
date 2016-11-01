@@ -1,9 +1,9 @@
 [package]
-name = "bincode"
+name = "mincode"
 version = "0.6.0"
-authors = ["Ty Overby <ty@pre-alpha.com>", "Francesco Mazzoli <f@mazzo.li>"]
+authors = ["Ty Overby <ty@pre-alpha.com>", "Francesco Mazzoli <f@mazzo.li>", "Boscop <kingboscop@gmail.com>"]
 
-repository = "https://github.com/TyOverby/bincode"
+repository = "https://github.com/Boscop/mincode"
 documentation = "http://tyoverby.github.io/bincode/bincode/"
 keywords = ["binary", "encode", "decode", "serialize", "deserialize"]
 
@@ -13,6 +13,13 @@ description = "A binary serialization / deserialization strategy and implementat
 [dependencies]
 byteorder = "0.5.*"
 num-traits = "0.1.32"
+# leb128 = "0.2.*"
+leb128 = { git = 'https://github.com/Boscop/leb128' }
+bit-vec = "0.4.*"
+# bitpack = "0.1.*"
+# bitpack = { git = 'https://github.com/Boscop/bitpack' }
+conv = "0.3.*"
+half = "*"
 
 [dependencies.rustc-serialize]
 version = "0.3.*"
@@ -23,7 +30,7 @@ version = "0.8.*"
 optional = true
 
 [dev-dependencies]
-serde_macros = "0.8.*"
+serde_derive = "0.8.*"
 
 [features]
 default = ["rustc-serialize", "serde"]

@@ -4,7 +4,7 @@
 
 use rustc_serialize_crate::{Encodable, Decodable};
 use std::io::{Write, Read};
-use ::SizeLimit;
+use ::{SizeLimit, FloatEncoding};
 
 pub use self::writer::{SizeChecker, EncoderWriter, EncodingResult, EncodingError};
 pub use self::reader::{DecoderReader, DecodingResult, DecodingError, InvalidEncoding};
@@ -16,19 +16,19 @@ mod writer;
 ///
 /// If the encoding would take more bytes than allowed by `size_limit`,
 /// an error is returned.
-pub fn encode<T: Encodable>(t: &T, size_limit: SizeLimit) -> EncodingResult<Vec<u8>> {
+pub fn encode<T: Encodable>(t: &T, size_limit: SizeLimit, float_enc: FloatEncoding) -> EncodingResult<Vec<u8>> {
     // Since we are putting values directly into a vector, we can do size
     // computation out here and pre-allocate a buffer of *exactly*
     // the right size.
     let mut w = if let SizeLimit::Bounded(l) = size_limit {
-        let actual_size = encoded_size_bounded(t, l);
+        let actual_size = encoded_size_bounded(t, l, float_enc);
         let actual_size = try!(actual_size.ok_or(EncodingError::SizeLimit));
         Vec::with_capacity(actual_size as usize)
     } else {
         vec![]
     };
 
-    match encode_into(t, &mut w, SizeLimit::Infinite) {
+    match encode_into(t, &mut w, SizeLimit::Infinite, float_enc) {
         Ok(()) => Ok(w),
         Err(e) => Err(e)
     }
@@ -38,9 +38,9 @@ pub fn encode<T: Encodable>(t: &T, size_limit: SizeLimit) -> EncodingResult<Vec<
 ///
 /// This method does not have a size-limit because if you already have the bytes
 /// in memory, then you don't gain anything by having a limiter.
-pub fn decode<T: Decodable>(b: &[u8]) -> DecodingResult<T> {
+pub fn decode<T: Decodable>(b: &[u8], float_enc: FloatEncoding) -> DecodingResult<T> {
     let mut b = b;
-    decode_from(&mut b, SizeLimit::Infinite)
+    decode_from(&mut b, SizeLimit::Infinite, float_enc)
 }
 
 /// Encodes an object directly into a `Writer`.
@@ -53,17 +53,18 @@ pub fn decode<T: Decodable>(b: &[u8]) -> DecodingResult<T> {
 /// encoding.
 pub fn encode_into<T: Encodable, W: Write>(t: &T,
                                            w: &mut W,
-                                           size_limit: SizeLimit)
+                                           size_limit: SizeLimit,
+                                           float_enc: FloatEncoding)
                                            -> EncodingResult<()> {
-    try!(match size_limit {
-        SizeLimit::Infinite => Ok(()),
+    match size_limit {
+        SizeLimit::Infinite => (),
         SizeLimit::Bounded(x) => {
-            let mut size_checker = SizeChecker::new(x);
-            t.encode(&mut size_checker)
+            let mut size_checker = SizeChecker::new(x, float_enc);
+            t.encode(&mut size_checker)?;
         }
-    });
+    }
 
-    t.encode(&mut writer::EncoderWriter::new(w))
+    t.encode(&mut writer::EncoderWriter::new(w, float_enc))
 }
 
 /// Decoes an object directly from a `Buffer`ed Reader.
@@ -75,8 +76,8 @@ pub fn encode_into<T: Encodable, W: Write>(t: &T,
 /// If this returns an `DecodingError`, assume that the buffer that you passed
 /// in is in an invalid state, as the error could be returned during any point
 /// in the reading.
-pub fn decode_from<R: Read, T: Decodable>(r: &mut R, size_limit: SizeLimit) -> DecodingResult<T> {
-    Decodable::decode(&mut reader::DecoderReader::new(r, size_limit))
+pub fn decode_from<R: Read, T: Decodable>(r: &mut R, size_limit: SizeLimit, float_enc: FloatEncoding) -> DecodingResult<T> {
+    Decodable::decode(&mut reader::DecoderReader::new(r, size_limit, float_enc))
 }
 
 
@@ -84,9 +85,9 @@ pub fn decode_from<R: Read, T: Decodable>(r: &mut R, size_limit: SizeLimit) -> D
 ///
 /// This is used internally as part of the check for encode_into, but it can
 /// be useful for preallocating buffers if thats your style.
-pub fn encoded_size<T: Encodable>(t: &T) -> u64 {
+pub fn encoded_size<T: Encodable>(t: &T, float_enc: FloatEncoding) -> u64 {
     use std::u64::MAX;
-    let mut size_checker = SizeChecker::new(MAX);
+    let mut size_checker = SizeChecker::new(MAX, float_enc);
     t.encode(&mut size_checker).ok();
     size_checker.written
 }
@@ -96,7 +97,7 @@ pub fn encoded_size<T: Encodable>(t: &T) -> u64 {
 ///
 /// If it can be encoded in `max` or fewer bytes, that number will be returned
 /// inside `Some`.  If it goes over bounds, then None is returned.
-pub fn encoded_size_bounded<T: Encodable>(t: &T, max: u64) -> Option<u64> {
-    let mut size_checker = SizeChecker::new(max);
+pub fn encoded_size_bounded<T: Encodable>(t: &T, max: u64, float_enc: FloatEncoding) -> Option<u64> {
+    let mut size_checker = SizeChecker::new(max, float_enc);
     t.encode(&mut size_checker).ok().map(|_| size_checker.written)
 }

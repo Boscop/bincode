@@ -4,10 +4,16 @@ use std::error::Error;
 use std::fmt;
 use std::convert::From;
 
+use byteorder::ReadBytesExt;
+use num_traits;
 use rustc_serialize_crate::Decoder;
 
-use byteorder::{BigEndian, ReadBytesExt};
 use ::SizeLimit;
+
+use conv::*;
+use leb128;
+
+use float::*;
 
 #[derive(Eq, PartialEq, Clone, Debug)]
 pub struct InvalidEncoding {
@@ -45,6 +51,12 @@ pub enum DecodingError {
     SizeLimit
 }
 
+pub type DecodingResult<T> = Result<T, DecodingError>;
+
+fn wrap_io(err: IoError) -> DecodingError {
+    DecodingError::IoError(err)
+}
+
 impl fmt::Display for DecodingError {
     fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
         match *self {
@@ -56,12 +68,6 @@ impl fmt::Display for DecodingError {
                 write!(fmt, "SizeLimit")
         }
     }
-}
-
-pub type DecodingResult<T> = Result<T, DecodingError>;
-
-fn wrap_io(err: IoError) -> DecodingError {
-    DecodingError::IoError(err)
 }
 
 impl Error for DecodingError {
@@ -101,15 +107,20 @@ impl From<IoError> for DecodingError {
 pub struct DecoderReader<'a, R: 'a> {
     reader: &'a mut R,
     size_limit: SizeLimit,
-    read: u64
+    read: u64,
+    read_f32: FloatDecoder<f32>,
+    read_f64: FloatDecoder<f64>,
 }
 
 impl<'a, R: Read> DecoderReader<'a, R> {
-    pub fn new(r: &'a mut R, size_limit: SizeLimit) -> DecoderReader<'a, R> {
+    pub fn new(r: &'a mut R, size_limit: SizeLimit, float_enc: FloatEncoding) -> DecoderReader<'a, R> {
+        let (read_f32, read_f64) = float_decoder(float_enc);
         DecoderReader {
             reader: r,
             size_limit: size_limit,
-            read: 0
+            read: 0,
+            read_f32: read_f32,
+            read_f64: read_f64,
         }
     }
 
@@ -117,9 +128,33 @@ impl<'a, R: Read> DecoderReader<'a, R> {
     pub fn bytes_read(&self) -> u64 {
         self.read
     }
+
+    fn read_unsigned<T: ValueFrom<usize> + num_traits::Unsigned>(&mut self) -> DecodingResult<T> {
+        let r = leb128::read::unsigned(&mut self.reader).map(|(v, n)| (v as usize, n));
+        self.map_leb128_result::<T, _>(r)
+    }
+
+    fn read_signed<T: ValueFrom<isize> + num_traits::Signed>(&mut self) -> DecodingResult<T> {
+        let r = leb128::read::signed(&mut self.reader).map(|(v, n)| (v as isize, n));
+        self.map_leb128_result::<T, _>(r)
+    }
+
+    fn map_leb128_result<T: ValueFrom<U>, U: ValueFrom<u64>>(&mut self, r: Result<(U, usize), leb128::read::Error>) -> DecodingResult<T> {
+        match r {
+            Ok((v, bytes_read)) => {
+                self.read_bytes(bytes_read as u64)?;
+                Ok(v.value_into().unwrap())
+            }
+            Err(e) => Err(match e {
+                leb128::read::Error::IoError(e) => DecodingError::IoError(e),
+                leb128::read::Error::Overflow => DecodingError::SizeLimit
+            })
+        }
+    }
 }
 
 impl <'a, A> DecoderReader<'a, A> {
+    #[inline]
     fn read_bytes(&mut self, count: u64) -> Result<(), DecodingError> {
         self.read = match self.read.checked_add(count) {
             Some(read) => read,
@@ -132,10 +167,10 @@ impl <'a, A> DecoderReader<'a, A> {
         }
     }
 
-    fn read_type<T>(&mut self) -> Result<(), DecodingError> {
+    /*fn read_type<T>(&mut self) -> Result<(), DecodingError> {
         use std::mem::size_of;
         self.read_bytes(size_of::<T>() as u64)
-    }
+    }*/
 }
 
 impl<'a, R: Read> Decoder for DecoderReader<'a, R> {
@@ -145,45 +180,39 @@ impl<'a, R: Read> Decoder for DecoderReader<'a, R> {
         Ok(())
     }
     fn read_usize(&mut self) -> DecodingResult<usize> {
-        Ok(try!(self.read_u64().map(|x| x as usize)))
+        self.read_unsigned::<_>()
     }
     fn read_u64(&mut self) -> DecodingResult<u64> {
-        try!(self.read_type::<u64>());
-        self.reader.read_u64::<BigEndian>().map_err(wrap_io)
+        self.read_unsigned::<_>()
     }
     fn read_u32(&mut self) -> DecodingResult<u32> {
-        try!(self.read_type::<u32>());
-        self.reader.read_u32::<BigEndian>().map_err(wrap_io)
+        self.read_unsigned::<_>()
     }
     fn read_u16(&mut self) -> DecodingResult<u16> {
-        try!(self.read_type::<u16>());
-        self.reader.read_u16::<BigEndian>().map_err(wrap_io)
+        self.read_unsigned::<_>()
     }
     fn read_u8(&mut self) -> DecodingResult<u8> {
-        try!(self.read_type::<u8>());
+        self.read_bytes(1)?;
         self.reader.read_u8().map_err(wrap_io)
     }
     fn read_isize(&mut self) -> DecodingResult<isize> {
-        self.read_i64().map(|x| x as isize)
+        self.read_signed::<_>()
     }
     fn read_i64(&mut self) -> DecodingResult<i64> {
-        try!(self.read_type::<i64>());
-        self.reader.read_i64::<BigEndian>().map_err(wrap_io)
+        self.read_signed::<_>()
     }
     fn read_i32(&mut self) -> DecodingResult<i32> {
-        try!(self.read_type::<i32>());
-        self.reader.read_i32::<BigEndian>().map_err(wrap_io)
+        self.read_signed::<_>()
     }
     fn read_i16(&mut self) -> DecodingResult<i16> {
-        try!(self.read_type::<i16>());
-        self.reader.read_i16::<BigEndian>().map_err(wrap_io)
+        self.read_signed::<_>()
     }
     fn read_i8(&mut self) -> DecodingResult<i8> {
-        try!(self.read_type::<i8>());
+        self.read_bytes(1)?;
         self.reader.read_i8().map_err(wrap_io)
     }
     fn read_bool(&mut self) -> DecodingResult<bool> {
-        let x = try!(self.read_i8());
+        let x = self.read_i8()?;
         match x {
             1 => Ok(true),
             0 => Ok(false),
@@ -194,12 +223,12 @@ impl<'a, R: Read> Decoder for DecoderReader<'a, R> {
         }
     }
     fn read_f64(&mut self) -> DecodingResult<f64> {
-        try!(self.read_type::<f64>());
-        self.reader.read_f64::<BigEndian>().map_err(wrap_io)
+        // self.reader.read_f64::<BigEndian>().map_err(wrap_io)
+        (self.read_f64)(&mut self.reader).map_err(wrap_io)
     }
     fn read_f32(&mut self) -> DecodingResult<f32> {
-        try!(self.read_type::<f32>());
-        self.reader.read_f32::<BigEndian>().map_err(wrap_io)
+        // self.reader.read_f32::<BigEndian>().map_err(wrap_io)
+        (self.read_f32)(&mut self.reader).map_err(wrap_io)
     }
     fn read_char(&mut self) -> DecodingResult<char> {
         use std::str;
@@ -239,8 +268,7 @@ impl<'a, R: Read> Decoder for DecoderReader<'a, R> {
     }
 
     fn read_str(&mut self) -> DecodingResult<String> {
-        let len = try!(self.read_usize());
-        try!(self.read_bytes(len as u64));
+        let len = self.read_usize()?;
 
         let mut buff = Vec::new();
         try!(self.reader.by_ref().take(len as u64).read_to_end(&mut buff));
@@ -260,16 +288,15 @@ impl<'a, R: Read> Decoder for DecoderReader<'a, R> {
     fn read_enum_variant<T, F>(&mut self, names: &[&str], mut f: F) -> DecodingResult<T>
         where F: FnMut(&mut DecoderReader<'a, R>, usize) -> DecodingResult<T>
     {
-        let id = try!(self.read_u32());
-        let id = id as usize;
+        let id = self.read_unsigned::<usize>()?;
         if id >= names.len() {
-                Err(DecodingError::InvalidEncoding(InvalidEncoding {
-                    desc: "out of bounds tag when reading enum variant",
-                    detail: Some(format!("Expected tag < {}, got {}", names.len(), id))
-                }))
-            } else {
-                f(self, id)
-            }
+            Err(DecodingError::InvalidEncoding(InvalidEncoding {
+                desc: "out of bounds tag when reading enum variant",
+                detail: Some(format!("Expected tag < {}, got {}", names.len(), id))
+            }))
+        } else {
+            f(self, id)
+        }
     }
     fn read_enum_variant_arg<T, F>(&mut self, _: usize, f: F) -> DecodingResult<T>
         where F: FnOnce(&mut DecoderReader<'a, R>) -> DecodingResult<T>
@@ -323,7 +350,7 @@ impl<'a, R: Read> Decoder for DecoderReader<'a, R> {
     fn read_option<T, F>(&mut self, mut f: F) -> DecodingResult<T>
         where F: FnMut(&mut DecoderReader<'a, R>, bool) -> DecodingResult<T>
     {
-        let x = try!(self.read_u8());
+        let x = self.read_u8()?;
         match x {
                 1 => f(self, true),
                 0 => f(self, false),
@@ -387,6 +414,7 @@ static UTF8_CHAR_WIDTH: [u8; 256] = [
 4,4,4,4,4,0,0,0,0,0,0,0,0,0,0,0, // 0xFF
 ];
 
+#[inline(always)]
 fn utf8_char_width(b: u8) -> usize {
     UTF8_CHAR_WIDTH[b as usize] as usize
 }

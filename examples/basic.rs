@@ -1,8 +1,8 @@
-extern crate bincode;
+extern crate mincode;
 extern crate rustc_serialize;
 
-use bincode::SizeLimit;
-use bincode::rustc_serialize::{encode, decode};
+use mincode::{SizeLimit, FloatEncoding};
+use mincode::rustc_serialize::{encode, decode};
 
 #[derive(RustcEncodable, RustcDecodable, PartialEq)]
 struct Entity {
@@ -17,15 +17,15 @@ struct World {
 
 fn main() {
     let world = World {
-        entities: vec![Entity {x: 0.0, y: 4.0}, Entity {x: 10.0, y: 20.5}]
+        entities: vec![Entity {x: 0.25, y: 4.0}, Entity {x: 10.0, y: 20.5}]
     };
 
-    let encoded: Vec<u8> = encode(&world, SizeLimit::Infinite).unwrap();
+    let encoded: Vec<u8> = encode(&world, SizeLimit::Infinite, FloatEncoding::F16).unwrap();
 
-    // 8 bytes for the length of the vector, 4 bytes per float.
-    assert_eq!(encoded.len(), 8 + 4 * 4);
+    // 1 byte for the length of the vector, 2 bytes per float.
+    assert_eq!(encoded.len(), 1 + 4 * 2);
 
-    let decoded: World = decode(&encoded[..]).unwrap();
+    let decoded: World = decode(&encoded, FloatEncoding::F16).unwrap();
 
     assert!(world == decoded);
 }

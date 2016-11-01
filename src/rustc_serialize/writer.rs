@@ -5,7 +5,11 @@ use std::fmt;
 
 use rustc_serialize_crate::Encoder;
 
-use byteorder::{BigEndian, WriteBytesExt};
+use byteorder::WriteBytesExt;
+
+use leb128;
+
+use float::*;
 
 pub type EncodingResult<T> = Result<T, EncodingError>;
 
@@ -28,11 +32,15 @@ pub enum EncodingError {
 /// For most cases, prefer the `encode_into` function.
 pub struct EncoderWriter<'a, W: 'a> {
     writer: &'a mut W,
+    write_f32: FloatEncoder<f32>,
+    write_f64: FloatEncoder<f64>,
 }
 
 pub struct SizeChecker {
     pub size_limit: u64,
-    pub written: u64
+    pub written: u64,
+    float_size_f32: usize,
+    float_size_f64: usize,
 }
 
 fn wrap_io(err: IoError) -> EncodingError {
@@ -65,18 +73,32 @@ impl Error for EncodingError {
 }
 
 impl <'a, W: Write> EncoderWriter<'a, W> {
-    pub fn new(w: &'a mut W) -> EncoderWriter<'a, W> {
+    pub fn new(w: &'a mut W, float_enc: FloatEncoding) -> EncoderWriter<'a, W> {
+        let (write_f32, write_f64) = float_encoder(float_enc);
         EncoderWriter {
             writer: w,
+            write_f32: write_f32,
+            write_f64: write_f64,
         }
+    }
+
+    fn write_unsigned<T: Into<u64>>(&mut self, v: T) -> EncodingResult<()> {
+        leb128::write::unsigned(&mut self.writer, v.into()).map(|_| ()).map_err(wrap_io)
+    }
+
+    fn write_signed<T: Into<i64>>(&mut self, v: T) -> EncodingResult<()> {
+        leb128::write::signed(&mut self.writer, v.into()).map(|_| ()).map_err(wrap_io)
     }
 }
 
 impl SizeChecker {
-    pub fn new(limit: u64) -> SizeChecker {
+    pub fn new(limit: u64, float_enc: FloatEncoding) -> SizeChecker {
+        let (float_size_f32, float_size_f64) = float_sizes(float_enc);
         SizeChecker {
             size_limit: limit,
-            written: 0
+            written: 0,
+            float_size_f32: float_size_f32,
+            float_size_f64: float_size_f64,
         }
     }
 
@@ -89,9 +111,25 @@ impl SizeChecker {
         }
     }
 
-    fn add_value<T>(&mut self, t: T) -> EncodingResult<()> {
-        use std::mem::size_of_val;
-        self.add_raw(size_of_val(&t))
+    /*fn add_value<T>(&mut self, _: T) -> EncodingResult<()> {
+        use std::mem::size_of;
+        self.add_raw(size_of::<T>())
+    }*/
+
+    fn add_value_unsigned<T: Into<u64>>(&mut self, t: T) -> EncodingResult<()> {
+        let mut v: Vec<u8> = vec![];
+        match leb128::write::unsigned(&mut v, t.into()) {
+            Ok(n) => self.add_raw(n),
+            Err(e) => Err(wrap_io(e))
+        }
+    }
+
+    fn add_value_signed<T: Into<i64>>(&mut self, t: T) -> EncodingResult<()> {
+        let mut v: Vec<u8> = vec![];
+        match leb128::write::signed(&mut v, t.into()) {
+            Ok(n) => self.add_raw(n),
+            Err(e) => Err(wrap_io(e))
+        }
     }
 }
 
@@ -102,31 +140,31 @@ impl<'a, W: Write> Encoder for EncoderWriter<'a, W> {
         Ok(())
     }
     fn emit_usize(&mut self, v: usize) -> EncodingResult<()> {
-        self.emit_u64(v as u64)
+        self.write_unsigned(v as u64)
     }
     fn emit_u64(&mut self, v: u64) -> EncodingResult<()> {
-        self.writer.write_u64::<BigEndian>(v).map_err(wrap_io)
+        self.write_unsigned(v)
     }
     fn emit_u32(&mut self, v: u32) -> EncodingResult<()> {
-        self.writer.write_u32::<BigEndian>(v).map_err(wrap_io)
+        self.write_unsigned(v)
     }
     fn emit_u16(&mut self, v: u16) -> EncodingResult<()> {
-        self.writer.write_u16::<BigEndian>(v).map_err(wrap_io)
+        self.write_unsigned(v)
     }
     fn emit_u8(&mut self, v: u8) -> EncodingResult<()> {
         self.writer.write_u8(v).map_err(wrap_io)
     }
     fn emit_isize(&mut self, v: isize) -> EncodingResult<()> {
-        self.emit_i64(v as i64)
+        self.write_signed(v as i64)
     }
     fn emit_i64(&mut self, v: i64) -> EncodingResult<()> {
-        self.writer.write_i64::<BigEndian>(v).map_err(wrap_io)
+        self.write_signed(v)
     }
     fn emit_i32(&mut self, v: i32) -> EncodingResult<()> {
-        self.writer.write_i32::<BigEndian>(v).map_err(wrap_io)
+        self.write_signed(v)
     }
     fn emit_i16(&mut self, v: i16) -> EncodingResult<()> {
-        self.writer.write_i16::<BigEndian>(v).map_err(wrap_io)
+        self.write_signed(v)
     }
     fn emit_i8(&mut self, v: i8) -> EncodingResult<()> {
         self.writer.write_i8(v).map_err(wrap_io)
@@ -135,10 +173,12 @@ impl<'a, W: Write> Encoder for EncoderWriter<'a, W> {
         self.writer.write_u8(if v {1} else {0}).map_err(wrap_io)
     }
     fn emit_f64(&mut self, v: f64) -> EncodingResult<()> {
-        self.writer.write_f64::<BigEndian>(v).map_err(wrap_io)
+        //self.writer.write_f64::<BigEndian>(v).map_err(wrap_io)
+        (self.write_f64)(&mut self.writer, v).map_err(wrap_io)
     }
     fn emit_f32(&mut self, v: f32) -> EncodingResult<()> {
-        self.writer.write_f32::<BigEndian>(v).map_err(wrap_io)
+        //self.writer.write_f32::<BigEndian>(v).map_err(wrap_io)
+        (self.write_f32)(&mut self.writer, v).map_err(wrap_io)
     }
     fn emit_char(&mut self, v: char) -> EncodingResult<()> {
         // TODO: change this back once unicode works
@@ -163,11 +203,7 @@ impl<'a, W: Write> Encoder for EncoderWriter<'a, W> {
     fn emit_enum_variant<F>(&mut self, _: &str, v_id: usize, _: usize, f: F) -> EncodingResult<()>
         where F: FnOnce(&mut EncoderWriter<'a, W>) -> EncodingResult<()>
     {
-        let max_u32: u32 = ::std::u32::MAX;
-        if v_id > (max_u32 as usize) {
-                panic!("Variant tag doesn't fit in a u32")
-            }
-        try!(self.emit_u32(v_id as u32));
+        try!(self.write_unsigned(v_id as u64));
         f(self)
     }
     fn emit_enum_variant_arg<F>(&mut self, _: usize, f: F) -> EncodingResult<()>
@@ -271,49 +307,51 @@ impl Encoder for SizeChecker {
         Ok(())
     }
     fn emit_usize(&mut self, v: usize) -> EncodingResult<()> {
-        self.add_value(v as u64)
+        self.add_value_unsigned(v as u64)
     }
     fn emit_u64(&mut self, v: u64) -> EncodingResult<()> {
-        self.add_value(v)
+        self.add_value_unsigned(v)
     }
     fn emit_u32(&mut self, v: u32) -> EncodingResult<()> {
-        self.add_value(v)
+        self.add_value_unsigned(v)
     }
     fn emit_u16(&mut self, v: u16) -> EncodingResult<()> {
-        self.add_value(v)
+        self.add_value_unsigned(v)
     }
-    fn emit_u8(&mut self, v: u8) -> EncodingResult<()> {
-        self.add_value(v)
+    fn emit_u8(&mut self, _: u8) -> EncodingResult<()> {
+        self.add_value_unsigned(0 as u8)
     }
     fn emit_isize(&mut self, v: isize) -> EncodingResult<()> {
-        self.add_value(v as i64)
+        self.add_value_signed(v as i64)
     }
     fn emit_i64(&mut self, v: i64) -> EncodingResult<()> {
-        self.add_value(v)
+        self.add_value_signed(v)
     }
     fn emit_i32(&mut self, v: i32) -> EncodingResult<()> {
-        self.add_value(v)
+        self.add_value_signed(v)
     }
     fn emit_i16(&mut self, v: i16) -> EncodingResult<()> {
-        self.add_value(v)
+        self.add_value_signed(v)
     }
     fn emit_i8(&mut self, v: i8) -> EncodingResult<()> {
-        self.add_value(v)
+        self.add_value_signed(v)
     }
     fn emit_bool(&mut self, _: bool) -> EncodingResult<()> {
-        self.add_value(0 as u8)
+        self.add_value_unsigned(0 as u8)
     }
-    fn emit_f64(&mut self, v: f64) -> EncodingResult<()> {
-        self.add_value(v)
+    fn emit_f64(&mut self, _: f64) -> EncodingResult<()> {
+        let bytes = self.float_size_f64;
+        self.add_raw(bytes)
     }
-    fn emit_f32(&mut self, v: f32) -> EncodingResult<()> {
-        self.add_value(v)
+    fn emit_f32(&mut self, _: f32) -> EncodingResult<()> {
+        let bytes = self.float_size_f32;
+        self.add_raw(bytes)
     }
     fn emit_char(&mut self, v: char) -> EncodingResult<()> {
         self.add_raw(v.len_utf8())
     }
     fn emit_str(&mut self, v: &str) -> EncodingResult<()> {
-        try!(self.add_value(0 as u64));
+        self.add_value_unsigned(v.len() as u64)?;
         self.add_raw(v.len())
     }
     fn emit_enum<F>(&mut self, __: &str, f: F) -> EncodingResult<()>
@@ -324,7 +362,7 @@ impl Encoder for SizeChecker {
     fn emit_enum_variant<F>(&mut self, _: &str, v_id: usize, _: usize, f: F) -> EncodingResult<()>
         where F: FnOnce(&mut SizeChecker) -> EncodingResult<()>
     {
-        try!(self.add_value(v_id as u32));
+        self.add_value_unsigned(v_id as u32)?;
         f(self)
     }
     fn emit_enum_variant_arg<F>(&mut self, _: usize, f: F) -> EncodingResult<()>
@@ -383,12 +421,12 @@ impl Encoder for SizeChecker {
         f(self)
     }
     fn emit_option_none(&mut self) -> EncodingResult<()> {
-        self.add_value(0 as u8)
+        self.add_value_unsigned(0 as u8)
     }
     fn emit_option_some<F>(&mut self, f: F) -> EncodingResult<()>
         where F: FnOnce(&mut SizeChecker) -> EncodingResult<()>
     {
-        try!(self.add_value(1 as u8));
+        try!(self.add_value_unsigned(1 as u8));
         f(self)
     }
     fn emit_seq<F>(&mut self, len: usize, f: F) -> EncodingResult<()>

@@ -17,21 +17,22 @@
 //!
 //! ```rust
 //! #![allow(unstable)]
-//! extern crate bincode;
-//! use bincode::rustc_serialize::{encode, decode};
+//! extern crate mincode;
+//! use mincode::rustc_serialize::{encode, decode};
+//! use mincode::{SizeLimit, FloatEncoding};
 //! fn main() {
 //!     // The object that we will serialize.
 //!     let target = Some("hello world".to_string());
 //!     // The maximum size of the encoded message.
-//!     let limit = bincode::SizeLimit::Bounded(20);
+//!     let limit = SizeLimit::Bounded(20);
 //!
-//!     let encoded: Vec<u8>        = encode(&target, limit).unwrap();
-//!     let decoded: Option<String> = decode(&encoded[..]).unwrap();
+//!     let encoded: Vec<u8>        = encode(&target, limit, FloatEncoding::Normal).unwrap();
+//!     let decoded: Option<String> = decode(&encoded[..], FloatEncoding::Normal).unwrap();
 //!     assert_eq!(target, decoded);
 //! }
 //! ```
 
-#![crate_name = "bincode"]
+#![crate_name = "mincode"]
 #![crate_type = "rlib"]
 #![crate_type = "dylib"]
 
@@ -43,11 +44,22 @@ extern crate byteorder;
 extern crate num_traits;
 #[cfg(feature = "serde")]
 extern crate serde as serde_crate;
-
+extern crate bit_vec;
+// extern crate bitpack as bit_pack;
+extern crate leb128;
+extern crate conv;
+extern crate half;
 
 pub use refbox::{RefBox, StrBox, SliceBox};
+pub use bitvec::{BVec, BitVec};
+// pub use bitpack::{BPack, BitPack};
+pub use float::FloatEncoding;
 
 mod refbox;
+mod bitvec;
+// mod bitpack;
+mod float;
+
 #[cfg(feature = "rustc-serialize")]
 pub mod rustc_serialize;
 #[cfg(feature = "serde")]
@@ -76,4 +88,3 @@ pub enum SizeLimit {
     Infinite,
     Bounded(u64)
 }
-

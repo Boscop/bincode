@@ -3,7 +3,7 @@
 //! implementation.
 
 use std::io::{Write, Read};
-use ::SizeLimit;
+use ::{SizeLimit, FloatEncoding};
 
 pub use self::reader::{
     Deserializer,
@@ -33,18 +33,18 @@ mod writer;
 /// If this returns an `SerializeError` (other than SizeLimit), assume that the
 /// writer is in an invalid state, as writing could bail out in the middle of
 /// serializing.
-pub fn serialize_into<W, T>(writer: &mut W, value: &T, size_limit: SizeLimit) -> SerializeResult<()>
+pub fn serialize_into<W, T>(writer: &mut W, value: &T, size_limit: SizeLimit, float_enc: FloatEncoding) -> SerializeResult<()>
     where W: Write, T: serde::Serialize,
 {
     match size_limit {
         SizeLimit::Infinite => { }
         SizeLimit::Bounded(x) => {
-            let mut size_checker = SizeChecker::new(x);
+            let mut size_checker = SizeChecker::new(x, float_enc);
             try!(value.serialize(&mut size_checker))
         }
     }
 
-    let mut serializer = Serializer::new(writer);
+    let mut serializer = Serializer::new(writer, float_enc);
     serde::Serialize::serialize(value, &mut serializer)
 }
 
@@ -52,7 +52,7 @@ pub fn serialize_into<W, T>(writer: &mut W, value: &T, size_limit: SizeLimit) ->
 ///
 /// If the serialization would take more bytes than allowed by `size_limit`,
 /// an error is returned.
-pub fn serialize<T>(value: &T, size_limit: SizeLimit) -> SerializeResult<Vec<u8>>
+pub fn serialize<T>(value: &T, size_limit: SizeLimit, float_enc: FloatEncoding) -> SerializeResult<Vec<u8>>
     where T: serde::Serialize,
 {
     // Since we are putting values directly into a vector, we can do size
@@ -60,7 +60,7 @@ pub fn serialize<T>(value: &T, size_limit: SizeLimit) -> SerializeResult<Vec<u8>
     // the right size.
     let mut writer = match size_limit {
         SizeLimit::Bounded(size_limit) => {
-            let actual_size = match serialized_size_bounded(value, size_limit) {
+            let actual_size = match serialized_size_bounded(value, size_limit, float_enc) {
                 Some(actual_size) => actual_size,
                 None => { return Err(SerializeError::SizeLimit); }
             };
@@ -69,7 +69,7 @@ pub fn serialize<T>(value: &T, size_limit: SizeLimit) -> SerializeResult<Vec<u8>
         SizeLimit::Infinite => Vec::new()
     };
 
-    try!(serialize_into(&mut writer, value, SizeLimit::Infinite));
+    try!(serialize_into(&mut writer, value, SizeLimit::Infinite, float_enc));
     Ok(writer)
 }
 
@@ -77,9 +77,9 @@ pub fn serialize<T>(value: &T, size_limit: SizeLimit) -> SerializeResult<Vec<u8>
 ///
 /// This is used internally as part of the check for encode_into, but it can
 /// be useful for preallocating buffers if thats your style.
-pub fn serialized_size<T: serde::Serialize>(value: &T) -> u64 {
+pub fn serialized_size<T: serde::Serialize>(value: &T, float_enc: FloatEncoding) -> u64 {
     use std::u64::MAX;
-    let mut size_checker = SizeChecker::new(MAX);
+    let mut size_checker = SizeChecker::new(MAX, float_enc);
     value.serialize(&mut size_checker).ok();
     size_checker.written
 }
@@ -89,8 +89,8 @@ pub fn serialized_size<T: serde::Serialize>(value: &T) -> u64 {
 ///
 /// If it can be serialized in `max` or fewer bytes, that number will be returned
 /// inside `Some`.  If it goes over bounds, then None is returned.
-pub fn serialized_size_bounded<T: serde::Serialize>(value: &T, max: u64) -> Option<u64> {
-    let mut size_checker = SizeChecker::new(max);
+pub fn serialized_size_bounded<T: serde::Serialize>(value: &T, max: u64, float_enc: FloatEncoding) -> Option<u64> {
+    let mut size_checker = SizeChecker::new(max, float_enc);
     value.serialize(&mut size_checker).ok().map(|_| size_checker.written)
 }
 
@@ -103,11 +103,11 @@ pub fn serialized_size_bounded<T: serde::Serialize>(value: &T, max: u64) -> Opti
 /// If this returns an `DeserializeError`, assume that the buffer that you passed
 /// in is in an invalid state, as the error could be returned during any point
 /// in the reading.
-pub fn deserialize_from<R, T>(reader: &mut R, size_limit: SizeLimit) -> DeserializeResult<T>
+pub fn deserialize_from<R, T>(reader: &mut R, size_limit: SizeLimit, float_enc: FloatEncoding) -> DeserializeResult<T>
     where R: Read,
           T: serde::Deserialize,
 {
-    let mut deserializer = Deserializer::new(reader, size_limit);
+    let mut deserializer = Deserializer::new(reader, size_limit, float_enc);
     serde::Deserialize::deserialize(&mut deserializer)
 }
 
@@ -115,9 +115,9 @@ pub fn deserialize_from<R, T>(reader: &mut R, size_limit: SizeLimit) -> Deserial
 ///
 /// This method does not have a size-limit because if you already have the bytes
 /// in memory, then you don't gain anything by having a limiter.
-pub fn deserialize<T>(bytes: &[u8]) -> DeserializeResult<T>
+pub fn deserialize<T>(bytes: &[u8], float_enc: FloatEncoding) -> DeserializeResult<T>
     where T: serde::Deserialize,
 {
     let mut reader = bytes;
-    deserialize_from(&mut reader, SizeLimit::Infinite)
+    deserialize_from(&mut reader, SizeLimit::Infinite, float_enc)
 }

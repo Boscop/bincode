@@ -6,7 +6,11 @@ use std::u32;
 
 use serde_crate as serde;
 
-use byteorder::{BigEndian, WriteBytesExt};
+use byteorder::WriteBytesExt;
+
+use leb128;
+
+use float::*;
 
 pub type SerializeResult<T> = Result<T, SerializeError>;
 
@@ -25,16 +29,18 @@ pub enum SerializeError {
     Custom(String)
 }
 
+fn wrap_io(err: IoError) -> SerializeError {
+    SerializeError::IoError(err)
+}
+
 /// An Serializer that encodes values directly into a Writer.
 ///
 /// This struct should not be used often.
 /// For most cases, prefer the `encode_into` function.
 pub struct Serializer<'a, W: 'a> {
     writer: &'a mut W,
-}
-
-fn wrap_io(err: IoError) -> SerializeError {
-    SerializeError::IoError(err)
+    write_f32: FloatEncoder<f32>,
+    write_f64: FloatEncoder<f64>,
 }
 
 impl serde::ser::Error for SerializeError {
@@ -72,18 +78,25 @@ impl Error for SerializeError {
 }
 
 impl<'a, W: Write> Serializer<'a, W> {
-    pub fn new(w: &'a mut W) -> Serializer<'a, W> {
+    pub fn new(w: &'a mut W, float_enc: FloatEncoding) -> Serializer<'a, W> {
+        let (write_f32, write_f64) = float_encoder(float_enc);
         Serializer {
             writer: w,
+            write_f32: write_f32,
+            write_f64: write_f64,
         }
     }
 
     fn add_enum_tag(&mut self, tag: usize) -> SerializeResult<()> {
-        if tag > u32::MAX as usize {
-            panic!("Variant tag doesn't fit in a u32")
-        }
+        self.write_unsigned(tag as u32)
+    }
 
-        serde::Serializer::serialize_u32(self, tag as u32)
+    fn write_unsigned<T: Into<u64>>(&mut self, v: T) -> SerializeResult<()> {
+        leb128::write::unsigned(&mut self.writer, v.into()).map(|_| ()).map_err(wrap_io)
+    }
+    
+    fn write_signed<T: Into<i64>>(&mut self, v: T) -> SerializeResult<()> {
+        leb128::write::signed(&mut self.writer, v.into()).map(|_| ()).map_err(wrap_io)
     }
 }
 
@@ -110,19 +123,19 @@ impl<'a, W: Write> serde::Serializer for Serializer<'a, W> {
     }
 
     fn serialize_u16(&mut self, v: u16) -> SerializeResult<()> {
-        self.writer.write_u16::<BigEndian>(v).map_err(wrap_io)
+        self.write_unsigned(v)
     }
 
     fn serialize_u32(&mut self, v: u32) -> SerializeResult<()> {
-        self.writer.write_u32::<BigEndian>(v).map_err(wrap_io)
+        self.write_unsigned(v)
     }
 
     fn serialize_u64(&mut self, v: u64) -> SerializeResult<()> {
-        self.writer.write_u64::<BigEndian>(v).map_err(wrap_io)
+        self.write_unsigned(v)
     }
 
     fn serialize_usize(&mut self, v: usize) -> SerializeResult<()> {
-        self.serialize_u64(v as u64)
+        self.write_unsigned(v as u64)
     }
 
     fn serialize_i8(&mut self, v: i8) -> SerializeResult<()> {
@@ -130,27 +143,29 @@ impl<'a, W: Write> serde::Serializer for Serializer<'a, W> {
     }
 
     fn serialize_i16(&mut self, v: i16) -> SerializeResult<()> {
-        self.writer.write_i16::<BigEndian>(v).map_err(wrap_io)
+        self.write_signed(v)
     }
 
     fn serialize_i32(&mut self, v: i32) -> SerializeResult<()> {
-        self.writer.write_i32::<BigEndian>(v).map_err(wrap_io)
+        self.write_signed(v)
     }
 
     fn serialize_i64(&mut self, v: i64) -> SerializeResult<()> {
-        self.writer.write_i64::<BigEndian>(v).map_err(wrap_io)
+        self.write_signed(v)
     }
 
     fn serialize_isize(&mut self, v: isize) -> SerializeResult<()> {
-        self.serialize_i64(v as i64)
+        self.write_signed(v as i64)
     }
 
     fn serialize_f32(&mut self, v: f32) -> SerializeResult<()> {
-        self.writer.write_f32::<BigEndian>(v).map_err(wrap_io)
+        // self.writer.write_f32::<BigEndian>(v).map_err(wrap_io)
+        (self.write_f32)(&mut self.writer, v).map_err(wrap_io)
     }
 
     fn serialize_f64(&mut self, v: f64) -> SerializeResult<()> {
-        self.writer.write_f64::<BigEndian>(v).map_err(wrap_io)
+        // self.writer.write_f64::<BigEndian>(v).map_err(wrap_io)
+        (self.write_f64)(&mut self.writer, v).map_err(wrap_io)
     }
 
     fn serialize_str(&mut self, v: &str) -> SerializeResult<()> {
@@ -330,14 +345,19 @@ impl<'a, W: Write> serde::Serializer for Serializer<'a, W> {
 
 pub struct SizeChecker {
     pub size_limit: u64,
-    pub written: u64
+    pub written: u64,
+    float_size_f32: usize,
+    float_size_f64: usize,
 }
 
 impl SizeChecker {
-    pub fn new(limit: u64) -> SizeChecker {
+    pub fn new(limit: u64, float_enc: FloatEncoding) -> SizeChecker {
+        let (float_size_f32, float_size_f64) = float_sizes(float_enc);
         SizeChecker {
             size_limit: limit,
-            written: 0
+            written: 0,
+            float_size_f32: float_size_f32,
+            float_size_f64: float_size_f64,
         }
     }
 
@@ -350,17 +370,29 @@ impl SizeChecker {
         }
     }
 
-    fn add_value<T>(&mut self, t: T) -> SerializeResult<()> {
+    /*fn add_value<T>(&mut self, t: T) -> SerializeResult<()> {
         use std::mem::size_of_val;
         self.add_raw(size_of_val(&t))
+    }*/
+
+    fn add_value_unsigned<T: Into<u64>>(&mut self, t: T) -> SerializeResult<()> {
+        let mut v: Vec<u8> = vec![];
+        match leb128::write::unsigned(&mut v, t.into()) {
+            Ok(n) => self.add_raw(n),
+            Err(e) => Err(wrap_io(e))
+        }
+    }
+
+    fn add_value_signed<T: Into<i64>>(&mut self, t: T) -> SerializeResult<()> {
+        let mut v: Vec<u8> = vec![];
+        match leb128::write::signed(&mut v, t.into()) {
+            Ok(n) => self.add_raw(n),
+            Err(e) => Err(wrap_io(e))
+        }
     }
 
     fn add_enum_tag(&mut self, tag: usize) -> SerializeResult<()> {
-        if tag > u32::MAX as usize {
-            panic!("Variant tag doesn't fit in a u32")
-        }
-
-        self.add_value(tag as u32)
+        self.add_value_unsigned(tag as u64)
     }
 }
 
@@ -379,59 +411,61 @@ impl serde::Serializer for SizeChecker {
     fn serialize_unit_struct(&mut self, _: &'static str) -> SerializeResult<()> { Ok(()) }
 
     fn serialize_bool(&mut self, _: bool) -> SerializeResult<()> {
-        self.add_value(0 as u8)
+        self.add_value_unsigned(0 as u8)
     }
 
-    fn serialize_u8(&mut self, v: u8) -> SerializeResult<()> {
-        self.add_value(v)
+    fn serialize_u8(&mut self, _: u8) -> SerializeResult<()> {
+        self.add_value_unsigned(0 as u8)
     }
 
     fn serialize_u16(&mut self, v: u16) -> SerializeResult<()> {
-        self.add_value(v)
+        self.add_value_unsigned(v)
     }
 
     fn serialize_u32(&mut self, v: u32) -> SerializeResult<()> {
-        self.add_value(v)
+        self.add_value_unsigned(v)
     }
 
     fn serialize_u64(&mut self, v: u64) -> SerializeResult<()> {
-        self.add_value(v)
+        self.add_value_unsigned(v)
     }
 
     fn serialize_usize(&mut self, v: usize) -> SerializeResult<()> {
-        self.serialize_u64(v as u64)
+        self.add_value_unsigned(v as u64)
     }
 
     fn serialize_i8(&mut self, v: i8) -> SerializeResult<()> {
-        self.add_value(v)
+        self.add_value_signed(v)
     }
 
     fn serialize_i16(&mut self, v: i16) -> SerializeResult<()> {
-        self.add_value(v)
+        self.add_value_signed(v)
     }
 
     fn serialize_i32(&mut self, v: i32) -> SerializeResult<()> {
-        self.add_value(v)
+        self.add_value_signed(v)
     }
 
     fn serialize_i64(&mut self, v: i64) -> SerializeResult<()> {
-        self.add_value(v)
+        self.add_value_signed(v)
     }
 
     fn serialize_isize(&mut self, v: isize) -> SerializeResult<()> {
         self.serialize_i64(v as i64)
     }
 
-    fn serialize_f32(&mut self, v: f32) -> SerializeResult<()> {
-        self.add_value(v)
+    fn serialize_f32(&mut self, _: f32) -> SerializeResult<()> {
+        let bytes = self.float_size_f32;
+        self.add_raw(bytes)
     }
 
-    fn serialize_f64(&mut self, v: f64) -> SerializeResult<()> {
-        self.add_value(v)
+    fn serialize_f64(&mut self, _: f64) -> SerializeResult<()> {
+        let bytes = self.float_size_f64;
+        self.add_raw(bytes)
     }
 
     fn serialize_str(&mut self, v: &str) -> SerializeResult<()> {
-        try!(self.add_value(0 as u64));
+        self.add_value_unsigned(v.len() as u64)?;
         self.add_raw(v.len())
     }
 
@@ -448,13 +482,13 @@ impl serde::Serializer for SizeChecker {
     }
 
     fn serialize_none(&mut self) -> SerializeResult<()> {
-        self.add_value(0 as u8)
+        self.add_value_unsigned(0 as u8)
     }
 
     fn serialize_some<T>(&mut self, v: T) -> SerializeResult<()>
         where T: serde::Serialize,
     {
-        try!(self.add_value(1 as u8));
+        self.add_value_unsigned(1 as u8)?;
         v.serialize(self)
     }
 
