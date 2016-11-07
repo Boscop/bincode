@@ -182,21 +182,28 @@ impl<'a, R: Read> Deserializer<'a, R> {
             }))
     }
 
-    fn read_unsigned<T: ValueFrom<u64> + num_traits::Unsigned>(&mut self) -> DeserializeResult<T> {
+    fn read_unsigned<T: ValueFrom<u64> + misc::Saturated + num_traits::Unsigned>(&mut self) -> DeserializeResult<T>
+    where RangeErrorKind: From<<T as ValueFrom<u64>>::Err> {
         let r = leb128::read::unsigned(&mut self.reader);
         self.map_leb128_result::<T, _>(r)
     }
 
-    fn read_signed<T: ValueFrom<i64> + num_traits::Signed>(&mut self) -> DeserializeResult<T> {
+    fn read_signed<T: ValueFrom<i64> + misc::Saturated + num_traits::Signed>(&mut self) -> DeserializeResult<T>
+    where RangeErrorKind: From<<T as ValueFrom<i64>>::Err> {
         let r = leb128::read::signed(&mut self.reader);
         self.map_leb128_result::<T, _>(r)
     }
 
-    fn map_leb128_result<T: ValueFrom<U>, U: ValueFrom<u64>>(&mut self, r: Result<(U, usize), leb128::read::Error>) -> DeserializeResult<T> {
+    fn map_leb128_result<T: ValueFrom<U> + misc::Saturated, U: ValueFrom<u64>>(&mut self, r: Result<(U, usize), leb128::read::Error>) -> DeserializeResult<T>
+    where RangeErrorKind: From<<T as ValueFrom<U>>::Err> {
         match r {
             Ok((v, bytes_read)) => {
                 self.read_bytes(bytes_read as u64)?;
-                Ok(v.value_into().unwrap())
+                // Ok(v.value_into().unwrap_or_saturate())
+                match v.value_into() {
+                    Ok(v) => Ok(v),
+                    Err(_) => Err(DeserializeError::SizeLimit)
+                }
             }
             Err(e) => Err(match e {
                 leb128::read::Error::IoError(e) => DeserializeError::IoError(e),

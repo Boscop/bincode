@@ -610,3 +610,43 @@ fn test_float_enc_same() {
         the_same(v, FloatEncoding::HalvePrecision);
     }
 }
+
+#[test]
+fn leb128_too_big_ints() {
+    fn decode_ok<T: Decodable>(mut encoded: &[u8]) -> bool {
+        let decoded: Result<T, _> = decode_from(&mut encoded, Infinite, FloatEncoding::Normal);
+        decoded.is_ok()
+    }
+    fn deserialize_ok<T: serde::Deserialize>(mut serialized: &[u8]) -> bool {
+        let deserialized: Result<T, _> = deserialize_from(&mut serialized, Infinite, FloatEncoding::Normal);
+        deserialized.is_ok()
+    }
+    fn proxy_decode_ok<V>(slice: &[u8]) -> bool
+        where V: Encodable + Decodable + serde::Serialize + serde::Deserialize + PartialEq + Debug + 'static
+    {
+        decode_ok::<V>(slice) && deserialize_ok::<V>(slice)
+    }
+    fn proxy_encode2<V>(element: &V) -> Vec<u8>
+        where V: Encodable + Decodable + serde::Serialize + serde::Deserialize + PartialEq + Debug + 'static
+    {
+        proxy_encode(element, Infinite, FloatEncoding::Normal)
+    }
+    fn proxy_decode2<V>(slice: &[u8]) -> V
+        where V: Encodable + Decodable + serde::Serialize + serde::Deserialize + PartialEq + Debug + 'static
+    {
+        proxy_decode(slice, FloatEncoding::Normal)
+    }
+    use std::{u8, u16, u32};
+    assert!(proxy_decode_ok::<u8>(&proxy_encode2(&u8::MAX)));
+    assert!(proxy_decode_ok::<u16>(&proxy_encode2(&u16::MAX)));
+    assert!(proxy_decode_ok::<u32>(&proxy_encode2(&u32::MAX)));
+    let u8m = proxy_encode2(&(u8::MAX as u16 + 1));
+    println!("u8m {:?}, dec {:?}", u8m, proxy_decode2::<u8>(&u8m));
+    // assert!(proxy_decode_ok::<u8>(&u8m));
+    let u16m = proxy_encode2(&(u16::MAX as u32 + 1));
+    // println!("u16m {:?}, dec {:?}", u16m, proxy_decode2::<u16>(&u16m));
+    assert!(!proxy_decode_ok::<u16>(&u16m));
+    let u32m = proxy_encode2(&(u32::MAX as u64 + 1));
+    // println!("u32m {:?}, dec {:?}", u32m, proxy_decode2::<u32>(&u32m));
+    assert!(!proxy_decode_ok::<u32>(&u32m));
+}
